@@ -2,5 +2,10 @@
 name = "ternary-pid"
 version = "0.1.0"
 edition = "2021"
-description = "Ternary PID controller with anti-windup and derivative filtering"
+description = "Ternary PID controller with anti-windup and derivative filtering for fleet governance"
 license = "MIT"
+repository = "https://github.com/SuperInstance/ternary-pid"
+homepage = "https://superinstance.ai"
+documentation = "https://docs.rs/ternary-pid"
+categories = ["algorithms", "science", "simulation"]
+keywords = ["pid", "ternary", "fleet", "control", "conservation"]
