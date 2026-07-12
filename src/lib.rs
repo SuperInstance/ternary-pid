@@ -25,7 +25,9 @@ pub struct TernaryPid {
 impl TernaryPid {
     pub fn new(kp: f64, ki: f64, kd: f64) -> Self {
         Self {
-            kp, ki, kd,
+            kp,
+            ki,
+            kd,
             deadband: 0.0,
             integral_limit: 100.0,
             derivative_filter: 0.1,
@@ -36,28 +38,67 @@ impl TernaryPid {
         }
     }
 
-    /// Compute ternary output for given setpoint and measurement
+    /// Compute ternary output for given setpoint and measurement.
+    ///
+    /// The discrete PID assumes a fixed unit sample time (Δt = 1). Gains
+    /// therefore carry implicit units: `ki` is per-sample and `kd` is in
+    /// samples. Callers sampling at a different rate must scale `ki` and
+    /// `kd` accordingly.
     pub fn update(&mut self, setpoint: f64, measurement: f64) -> i8 {
         let error = setpoint - measurement;
 
         // Deadband check
         if error.abs() < self.deadband {
             self.integral *= 0.95; // Slowly bleed integral in deadband
+                                   // Keep derivative state consistent so the next non-deadband
+                                   // sample does not compute a derivative against a stale error
+                                   // (huge bogus spike) or skip the derivative entirely
+                                   // (treated as uninitialized). See test_deadband_does_not_break_derivative.
+            self.prev_error = error;
+            self.initialized = true;
             return 0;
         }
 
+        let output = self.compute_pid(error);
+        // Ternary decision
+        if output > 0.0 {
+            1
+        } else if output < 0.0 {
+            -1
+        } else {
+            0
+        }
+    }
+
+    /// Get raw PID output before ternary quantization.
+    ///
+    /// Note: `update_raw` deliberately does NOT apply the deadband or
+    /// integral bleed — it is intended for cascade outer loops and other
+    /// callers that need the unclamped continuous signal. The ternary
+    /// `update()` is the only entry point that quantizes.
+    pub fn update_raw(&mut self, setpoint: f64, measurement: f64) -> f64 {
+        let error = setpoint - measurement;
+        self.compute_pid(error)
+    }
+
+    /// Shared discrete PID core. Does not apply the deadband; callers
+    /// decide whether to short-circuit on `|error| < deadband`.
+    fn compute_pid(&mut self, error: f64) -> f64 {
         // Proportional
         let p = self.kp * error;
 
         // Integral with anti-windup
         self.integral += error;
-        self.integral = self.integral.clamp(-self.integral_limit, self.integral_limit);
+        self.integral = self
+            .integral
+            .clamp(-self.integral_limit, self.integral_limit);
         let i = self.ki * self.integral;
 
-        // Derivative with filtering
+        // Derivative with first-order low-pass filtering
         let derivative = if self.initialized {
             let raw_d = error - self.prev_error;
-            self.filtered_derivative = self.derivative_filter * raw_d + (1.0 - self.derivative_filter) * self.filtered_derivative;
+            self.filtered_derivative = self.derivative_filter * raw_d
+                + (1.0 - self.derivative_filter) * self.filtered_derivative;
             self.filtered_derivative
         } else {
             0.0
@@ -67,26 +108,6 @@ impl TernaryPid {
         self.prev_error = error;
         self.initialized = true;
 
-        let output = p + i + d;
-        // Ternary decision
-        if output > 0.0 { 1 } else if output < 0.0 { -1 } else { 0 }
-    }
-
-    /// Get raw PID output before ternary quantization
-    pub fn update_raw(&mut self, setpoint: f64, measurement: f64) -> f64 {
-        let error = setpoint - measurement;
-        let p = self.kp * error;
-        self.integral += error;
-        self.integral = self.integral.clamp(-self.integral_limit, self.integral_limit);
-        let i = self.ki * self.integral;
-        let derivative = if self.initialized {
-            let raw_d = error - self.prev_error;
-            self.filtered_derivative = self.derivative_filter * raw_d + (1.0 - self.derivative_filter) * self.filtered_derivative;
-            self.filtered_derivative
-        } else { 0.0 };
-        let d = self.kd * derivative;
-        self.prev_error = error;
-        self.initialized = true;
         p + i + d
     }
 
@@ -110,8 +131,14 @@ impl CascadePid {
     }
 
     /// Outer loop produces setpoint for inner loop
-    pub fn update(&mut self, outer_setpoint: f64, outer_measurement: f64, inner_measurement: f64) -> i8 {
-        let inner_setpoint = self.outer.update_raw(outer_setpoint, outer_measurement) + outer_setpoint;
+    pub fn update(
+        &mut self,
+        outer_setpoint: f64,
+        outer_measurement: f64,
+        inner_measurement: f64,
+    ) -> i8 {
+        let inner_setpoint =
+            self.outer.update_raw(outer_setpoint, outer_measurement) + outer_setpoint;
         self.inner.update(inner_setpoint, inner_measurement)
     }
 }
@@ -127,7 +154,11 @@ pub struct FeedforwardPid {
 
 impl FeedforwardPid {
     pub fn new(pid: TernaryPid, ff_gain: f64, disturbance_bias: f64) -> Self {
-        Self { pid, ff_gain, disturbance_bias }
+        Self {
+            pid,
+            ff_gain,
+            disturbance_bias,
+        }
     }
 
     pub fn update(&mut self, setpoint: f64, measurement: f64, disturbance: f64) -> i8 {
@@ -144,7 +175,7 @@ mod tests {
     #[test]
     fn test_proportional_only() {
         let mut pid = TernaryPid::new(1.0, 0.0, 0.0);
-        assert_eq!(pid.update(10.0, 5.0), 1);  // positive error -> +1
+        assert_eq!(pid.update(10.0, 5.0), 1); // positive error -> +1
         assert_eq!(pid.update(5.0, 10.0), -1); // negative error -> -1
     }
 
