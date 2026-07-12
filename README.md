@@ -120,13 +120,45 @@ assert_eq!(cmd, 1); // feedforward adjusts setpoint up
 | `FeedforwardPid::new(pid, ff_gain, bias)` | Feedforward + feedback |
 | `.update(sp, meas, disturbance) → i8` | Compensated update |
 
+### Discrete-time assumption
+
+The controller is implemented in discrete time with an implicit fixed sample
+period of Δt = 1. The integral accumulates raw error samples
+($\sum e$, no Δt factor) and the derivative uses raw sample-to-sample
+differences ($e(t) - e(t-1)$, no division by Δt). As a result the gains
+carry implicit units: $K_p$ is dimensionless, $K_i$ is per-sample, and $K_d$
+is in samples. Callers running the loop at a different sample rate must scale
+$K_i$ and $K_d$ accordingly. The textbook continuous-time gains recovered at
+any particular sample rate are $K_i^{\text{ct}} = K_i / \Delta t$ and
+$K_d^{\text{ct}} = K_d \cdot \Delta t$.
+
 ## Architecture Notes
 
-The ternary PID embodies the **γ + η = C** identity in control theory. The +1 command (constructive, γ) drives the system toward the setpoint, the -1 command (inhibitory, η) drives it away from overshoot, and the 0 command (neutral) conserves actuator energy. The conserved quantity $C$ is the actuator duty cycle — bounded by physical constraints (thermal limits, fuel, battery life).
+> **Status:** This section is **interpretive framing, not a formal
+> control-theory result.** The discrete PID math itself (P/I/D terms,
+> anti-windup clamp, derivative low-pass, ternary quantization) is
+> rigorously implemented and verified by `test_discrete_pid_math_matches_textbook_formula`.
+> The γ+η=C mapping below is a metaphor borrowed from a sibling
+> conservation-law project; no quantity is mathematically conserved by
+> the algorithm in this crate. Treat it as a design mnemonic.
 
-Anti-windup ensures that the *budget* of corrective action doesn't accumulate beyond $C$. The deadband prevents the controller from spending $\gamma$ and $\eta$ on noise that averages to zero — a direct application of conservation: only spend control authority when the error exceeds the noise floor.
+The ternary PID can be read through the **γ + η = C** identity as a
+*metaphor* for actuator authority: the +1 command (constructive, γ) drives
+the system toward the setpoint, the -1 command (inhibitory, η) drives it
+away from overshoot, and the 0 command (neutral) spends no actuator budget.
+The "conserved quantity" $C$ is a *physical* actuator budget — thermal
+limits, fuel, battery life — enforced by the hardware, not by this code.
 
-The cascade architecture splits $C$ into two sub-budgets: the outer loop's $C_{\text{outer}}$ determines the setpoint trajectory, and the inner loop's $C_{\text{inner}}$ tracks it. The total $C = C_{\text{outer}} + C_{\text{inner}}$ is conserved.
+Anti-windup is best understood through standard control theory (preventing
+integrator saturation during sustained error) rather than as a
+budget-conservation law. The deadband similarly has a standard
+interpretation: only spend control authority when the error exceeds the
+noise floor.
+
+The cascade architecture is a standard two-loop structure; the outer loop's
+raw (unquantized) output becomes the inner loop's setpoint. There is no
+formal sense in which $C = C_{\text{outer}} + C_{\text{inner}}$ is conserved
+by the algorithm — each loop spends its own actuator authority independently.
 
 ## References
 
